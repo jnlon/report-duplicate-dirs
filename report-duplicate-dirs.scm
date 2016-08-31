@@ -6,12 +6,8 @@
 
 ; Directory checksum structure:
 ; 
-; ( ((path . "./dir1") (cksum (dir-size . 9586)))
-;   ((path . "./dir2/another") (cksum (dir-size . 4108)))
-;   ((path . "./dir2/other") (cksum (dir-size . 4100)))
-;   ((path . "./dir2/tmp") (cksum (dir-size . 4100)))
+; ( ((path . "./dir1") (cksum (dir-size . 9586) (file-list ...)))
 ;   ... )
-;
 
 (define (flat-print lst-dir-paths)
   (let ((print-group
@@ -55,8 +51,14 @@
 (define (get-dir-sz s)
   (get-from-cksum 'dir-size s))
 
+(define (get-dir-file-lst s)
+  (get-from-cksum 'file-list s))
+
 (define (path-combine tail head)
   (string-append tail file-name-separator-string head))
+
+(define (bytes->megabytes numbytes)
+  (/ (/ numbytes 1024) 1024))
 
 (define (string-trim-path-slash str)
   (if (equal? (string fs-slash-chr) str)
@@ -77,6 +79,12 @@
     ((dir stat children ...)
      (apply + (stat:size stat) (map get-culm-dir-size children))))) 
 
+(define (get-file-list tree)
+  (match tree
+    ((file stat) (list file))
+    ((dir stat children ...)
+     (concatenate (map get-file-list children)))))
+
 (define (over-max-dir-sz? sz)
   (> sz *OPT-MAX-DIR-SZ*))
 
@@ -96,6 +104,11 @@
            (get-cksum pivot-dir) 
            (get-cksum testdir))))
 
+     (statline 
+       (format #f "## Files: ~a Size: ~1,2fM ##" 
+           (length (get-dir-file-lst pivot-dir))
+           (bytes->megabytes (get-dir-sz pivot-dir))))
+
     ; List of directory paths with the same cksum as pivot-dir 
      (dup-dir-paths 
        (map get-path ; get paths from the structure
@@ -112,12 +125,14 @@
        (or
          (= 1 (length dup-dir-paths))  ; pivot-dir has no duplicates
          (any (lambda (past-dir)       ; it is a sub directory of another duplicate
-                (string-contains (get-path pivot-dir) (car past-dir)))
+                (string-contains 
+                  (get-path pivot-dir) 
+                  (cadr past-dir))) ; HACK! Use second elem because statline is the first
               prev-dup-dir-paths))))
 
     (cond 
       ((null? all-other-dirs) ; No more directories left!
-       (if (> (length dup-dir-paths) 1)
+        (if (> (length dup-dir-paths) 1)
          (cons dup-dir-paths prev-dup-dir-paths)
          prev-dup-dir-paths))
       (skip?                  ; Should we skip this series of directories?
@@ -125,7 +140,7 @@
       (else                   ; Keep scanning!
         (get-dup-dirs 
           all-other-dirs 
-          (cons dup-dir-paths prev-dup-dir-paths))))))
+          (cons (cons statline dup-dir-paths) prev-dup-dir-paths))))))
 
 ; Is the file at the top of this tree a directory?
 (define (tree-is-dir? tree)
@@ -142,7 +157,10 @@
        (cons
          (list 
            (cons 'path path)
-           (cons 'cksum (list (cons 'dir-size (get-culm-dir-size tree)))))
+           (cons 'cksum 
+                 (list 
+                   (cons 'dir-size (get-culm-dir-size tree))
+                   (cons 'file-list (sort (get-file-list tree) string-ci<)))))
          (concatenate 
            (map 
              (lambda (new-tree) 
@@ -168,11 +186,16 @@
         (_ (format *OUT* "Filtering... ~%"))
         (dirs-with-cksum (filter entry-over-max-dir-sz? dirs-with-cksum)))
 
+      (define *FS-TREE*)
+
       (displayln "Sorting...")
 
       (benchmark-timer 
         (lambda () (sort! dirs-with-cksum less-than-sort-cksums)) "sort!")
 
-      (*OPT-PRINT-FUNC* (get-dup-dirs dirs-with-cksum '()))))
+
+      (if (null? dirs-with-cksum)
+        '()
+        (*OPT-PRINT-FUNC* (get-dup-dirs dirs-with-cksum '())))))
 
 (main (command-line))
